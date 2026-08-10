@@ -232,6 +232,17 @@ fn parse_tokens(tokens: Vec<Token>, args: Option<ParserArgs>) -> Result<Node> {
             }
             TokenEvent::End(_token_type) => {
                 if stack.len() > 1 {
+                    // `close_to_tag` may have already attached open markdown
+                    // containers (lists, paragraphs, …) to a Markdoc tag that
+                    // closed mid-structure. Pulldown-cmark still emits the
+                    // matching End events afterward; ignoring them when a
+                    // Markdoc tag is on top keeps `{% if %}` / `{% callout %}`
+                    // from being popped early (which would leak later siblings
+                    // out of the conditional — e.g. a list inside a callout
+                    // inside an if, then a blank line, then another callout).
+                    if matches!(stack.last().map(|n| &n.node_type), Some(NodeType::Tag)) {
+                        continue;
+                    }
                     let node = stack.pop().unwrap();
 
                     if let Some(parent) = stack.last_mut() {
@@ -630,6 +641,83 @@ mod tests {
     }
 
     #[test]
+    fn parses_underscore_emphasis_with_interpolated_variable() {
+        // Emphasis delimiters still wrap an inline `{% $var %}` interpolation
+        // node (resolved later at transform time).
+        let src = "* _{% $model %} Manual_\n";
+        let doc = parse(src, None).unwrap();
+        let em = find(&doc, &|n| matches!(n.node_type, NodeType::Em)).expect("em present");
+        let interp = find(em, &|n| n.tag.as_deref() == Some(INTERPOLATION_TAG))
+            .expect("interpolation inside em");
+        assert_eq!(
+            interp.expressions.get("primary").map(String::as_str),
+            Some("$model")
+        );
+        let text = find(em, &|n| matches!(n.node_type, NodeType::Text)).expect("text in em");
+        assert_eq!(
+            text.attributes.get("content"),
+            Some(&Scalar::String(" Manual".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_bold_with_interpolated_variable() {
+        let src = "**{% $mir_fleet %}**\n";
+        let doc = parse(src, None).unwrap();
+        let strong =
+            find(&doc, &|n| matches!(n.node_type, NodeType::Strong)).expect("strong present");
+        let interp = find(strong, &|n| n.tag.as_deref() == Some(INTERPOLATION_TAG))
+            .expect("interpolation inside strong");
+        assert_eq!(
+            interp.expressions.get("primary").map(String::as_str),
+            Some("$mir_fleet")
+        );
+    }
+
+    #[test]
+    fn spaced_underscores_do_not_form_emphasis() {
+        let src = "* _ {% $model %} Manual _\n";
+        let doc = parse(src, None).unwrap();
+        assert!(
+            find(&doc, &|n| matches!(n.node_type, NodeType::Em)).is_none(),
+            "spaces inside _ delimiters must prevent emphasis"
+        );
+    }
+
+    #[test]
+    fn indented_bold_inside_if_is_not_emphasis() {
+        // Four-space indent makes this a code block in CommonMark, not bold.
+        let src = r#"{% if $show %}
+
+    **MiR Fleet**
+
+{% /if %}"#;
+        let doc = parse(src, None).unwrap();
+        assert!(
+            find(&doc, &|n| matches!(n.node_type, NodeType::Strong)).is_none(),
+            "indented bold inside if-block is not parsed as Strong"
+        );
+    }
+
+    #[test]
+    fn dedented_bold_inside_if_parses_as_strong() {
+        let src = r#"{% if $show %}
+
+**MiR Fleet**
+
+{% /if %}"#;
+        let doc = parse(src, None).unwrap();
+        let strong =
+            find(&doc, &|n| matches!(n.node_type, NodeType::Strong)).expect("strong present");
+        let text =
+            find(strong, &|n| matches!(n.node_type, NodeType::Text)).expect("text in strong");
+        assert_eq!(
+            text.attributes.get("content"),
+            Some(&Scalar::String("MiR Fleet".to_string()))
+        );
+    }
+
+    #[test]
     fn captures_heading_id_sugar() {
         let src = "# Overview {% #my-overview %}";
         let doc = parse(src, None).unwrap();
@@ -734,6 +822,85 @@ mod tests {
         );
         // Each branch's content is wrapped in its own paragraph.
         assert_eq!(count_children(if_node, &is_para), 2);
+    }
+
+    #[test]
+    fn list_inside_callout_inside_if_keeps_following_siblings() {
+        // Regression: a markdown list inside `{% callout %}` leaves
+        // pending List/Item/Paragraph End events after `{% /callout %}`.
+        // Those must not pop the enclosing `{% if %}`, or later callouts
+        // (and `{% else / %}`) escape the conditional.
+        let src = r#"{% if $x %}
+{% callout type="warning" %}
+Intro text.
+* first item
+
+* second item
+{% /callout %}
+
+{% callout type="warning" %}
+Second callout
+{% /callout %}
+{% /if %}
+"#;
+        let doc = parse(src, None).unwrap();
+        assert_eq!(
+            count_children(&doc, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("if")),
+            1,
+            "exactly one top-level if, tree was {doc:#?}"
+        );
+        let if_node = tag_named(&doc, "if").unwrap();
+        assert_eq!(
+            count_children(if_node, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("callout")),
+            2,
+            "both callouts must stay inside if, tree was {doc:#?}"
+        );
+        assert_eq!(
+            count_children(&doc, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("callout")),
+            0,
+            "no callout may leak to document root, tree was {doc:#?}"
+        );
+    }
+
+    #[test]
+    fn list_inside_callout_then_else_stays_inside_if() {
+        let src = r#"{% if $top_module %}
+{% callout type="warning" %}
+If the robot transports a load that is larger than the supported size.
+
+* Do not load the robot with loads that extend beyond supported dimensions.
+{% /callout %}
+
+{% else / %}
+
+{% callout type="warning" %}
+Else branch callout
+{% /callout %}
+{% /if %}
+"#;
+        let doc = parse(src, None).unwrap();
+        let if_node = tag_named(&doc, "if").expect("if present");
+        assert_eq!(
+            count_children(if_node, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("else")),
+            1,
+            "else must be a direct child of if, tree was {doc:#?}"
+        );
+        assert_eq!(
+            count_children(if_node, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("callout")),
+            2,
+            "both branch callouts must stay inside if, tree was {doc:#?}"
+        );
+        assert_eq!(
+            count_children(&doc, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("else")),
+            0,
+            "else must not leak to document root, tree was {doc:#?}"
+        );
     }
 
     #[test]

@@ -195,7 +195,7 @@ fn is_valid_name(s: &str) -> bool {
 ///   - `key=funcname(arg1, arg2)`
 ///   - bare leading expression (no key=): becomes `primary`. This is
 ///     needed for `{% if $cfg.foo %}` and similar.
-fn parse_attrs(src: &str) -> TagAttrs {
+pub(crate) fn parse_attrs(src: &str) -> TagAttrs {
     let mut attrs = TagAttrs::default();
     let bytes = src.as_bytes();
     let mut cursor = 0usize;
@@ -223,22 +223,26 @@ fn parse_attrs(src: &str) -> TagAttrs {
         let has_eq = identifier_end < bytes.len() && bytes[identifier_end] == b'=';
 
         if identifier_end == key_start || !has_eq {
-            // The rest of `src` is the primary expression. Route it
-            // through `consume_value` so quoted-string primaries like
-            // `{% tag "X" /%}` are unwrapped the same way keyed values
-            // are — without this, the surrounding quotes leak into the
-            // attribute and downstream consumers see `"X"` instead of `X`.
+            // Unkeyed value → `primary`. Quoted primaries
+            // (`{% tag "X" numbered="false" /%}`) consume only the string
+            // so trailing keyed attributes still parse. Unquoted forms
+            // (`{% if $cfg.foo %}` / function calls) take one value token
+            // the same way; anything left is parsed as further attrs.
             let remainder = &src[key_start..];
             let trimmed_start = remainder
                 .bytes()
                 .take_while(|b| b.is_ascii_whitespace())
                 .count();
             let trimmed = &remainder[trimmed_start..];
-            if !trimmed.is_empty() {
-                let (value, _) = consume_value(remainder);
+            if trimmed.is_empty() {
+                break;
+            }
+            let (value, consumed) = consume_value(remainder);
+            if attrs.primary.is_none() {
                 attrs.primary = Some(value);
             }
-            break;
+            cursor = key_start + consumed;
+            continue;
         }
 
         let key = &src[key_start..identifier_end];
@@ -453,6 +457,25 @@ mod tests {
         match &tags[0].kind {
             TagKind::HeadingId { id } => assert_eq!(id, "my-id"),
             _ => panic!("expected heading id"),
+        }
+    }
+
+    #[test]
+    fn parses_primary_shorthand_with_trailing_attrs() {
+        let (_, tags) = segment_with_tags(r#"{% tag "intro" numbered="false" /%}"#);
+        assert_eq!(tags.len(), 1);
+        if let TagKind::SelfClose { name, attrs } = &tags[0].kind {
+            assert_eq!(name, "tag");
+            match attrs.primary.as_ref().unwrap() {
+                AttrValue::Literal(Scalar::String(s)) => assert_eq!(s, "intro"),
+                v => panic!("expected string primary, got {v:?}"),
+            }
+            match attrs.named.get("numbered").unwrap() {
+                AttrValue::Literal(Scalar::String(s)) => assert_eq!(s, "false"),
+                v => panic!("expected numbered=false, got {v:?}"),
+            }
+        } else {
+            panic!("expected self-closing tag");
         }
     }
 
