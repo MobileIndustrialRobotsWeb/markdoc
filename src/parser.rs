@@ -1011,4 +1011,45 @@ Else branch callout
         let t2 = find(&plain, &|n| matches!(n.node_type, NodeType::Table)).expect("table");
         assert!(!t2.attributes.contains_key("align"));
     }
+
+    #[test]
+    fn indented_if_inside_ordered_list_keeps_one_list() {
+        // PDF preprocess keeps list-continuation indent on `{% if %}` so
+        // CommonMark does not terminate the ordered list between steps.
+        let src = r#"1. First step.
+
+2. Second step.
+   {% if not($top_module) %}
+   {% image id="aaa" /%}
+   {% else / %}
+   {% image id="bbb" /%}
+   {% /if %}
+
+3. Third step.
+"#;
+        let doc = parse(src, None).unwrap();
+        assert_eq!(
+            count_children(&doc, &|n| matches!(n.node_type, NodeType::List)),
+            1,
+            "expected a single ordered list, tree was {doc:#?}"
+        );
+        let list = find(&doc, &|n| matches!(n.node_type, NodeType::List)).unwrap();
+        assert_eq!(
+            count_children(list, &|n| matches!(n.node_type, NodeType::Item)),
+            3,
+            "expected three list items, tree was {doc:#?}"
+        );
+        let second = list
+            .children
+            .iter()
+            .filter(|n| matches!(n.node_type, NodeType::Item))
+            .nth(1)
+            .expect("second item");
+        assert_eq!(
+            count_children(second, &|n| matches!(n.node_type, NodeType::Tag)
+                && n.tag.as_deref() == Some("if")),
+            1,
+            "conditional must stay inside the second list item, tree was {doc:#?}"
+        );
+    }
 }

@@ -408,7 +408,7 @@ pub fn default_tags() -> HashMap<String, Schema> {
                         default: None,
                         required: false,
                         description: Some(
-                            "Display size preset: small (50%) | medium (75%) | large (100%, default) of the available width".into(),
+                            "Display size preset: small (45%) | medium (75%) | large (100%, default) of the available width".into(),
                         ),
                     },
                 );
