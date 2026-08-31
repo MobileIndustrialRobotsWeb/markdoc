@@ -1064,6 +1064,87 @@ pub fn default_tags() -> HashMap<String, Schema> {
         },
     );
 
+    // ── gate ────────────────────────────────────────────────────────────
+    // A free-reading cut-off (a newspaper-style metered wall). Everything
+    // BEFORE the gate is the free preview served to everyone; everything
+    // AFTER it is gated. Adeptus serves the below-gate section only to a
+    // viewer who holds the required `access_level` (a value from the
+    // document's accessLevel vocabulary) — readers without it receive only
+    // the content above the gate. A digital-rendering marker: markdoc-pdf
+    // strips it (a printed PDF always carries the whole document).
+    tags.insert(
+        "gate".to_string(),
+        Schema {
+            render: None,
+            children: None,
+            attributes: Some({
+                let mut attrs = HashMap::new();
+                attrs.insert(
+                    "access_level".to_string(),
+                    SchemaAttribute {
+                        attr_type: Some(vec![ValidationType::String]),
+                        render: None,
+                        default: None,
+                        required: false,
+                        description: Some(
+                            "Access level required to read below the gate (from the document's accessLevel vocabulary); omit for the platform's default gated tier".to_string(),
+                        ),
+                    },
+                );
+                attrs
+            }),
+            self_closing: true,
+            inline: false,
+            description: Some(
+                "Free-reading cut-off; content below is gated by accessLevel".to_string(),
+            ),
+        },
+    );
+
+    // ── ad ──────────────────────────────────────────────────────────────
+    // An ad slot: a location where a digital renderer may inject an
+    // advertisement, carrying targeting metadata. Relevancy layers on the
+    // document's frontmatter `tags` / `products`, refined per slot by
+    // `categories` / `keywords`. A digital-rendering marker: markdoc-pdf
+    // strips it (no ads in print).
+    tags.insert(
+        "ad".to_string(),
+        Schema {
+            render: None,
+            children: None,
+            attributes: Some({
+                let mut attrs = HashMap::new();
+                for (name, desc) in [
+                    ("slot", "Stable slot name, for fill tracking / analytics"),
+                    (
+                        "format",
+                        "Ad format / size hint, e.g. leaderboard | inline | square",
+                    ),
+                    ("categories", "Comma-separated ad categories for targeting"),
+                    (
+                        "keywords",
+                        "Extra relevancy keywords, beyond the document's tags / products",
+                    ),
+                ] {
+                    attrs.insert(
+                        name.to_string(),
+                        SchemaAttribute {
+                            attr_type: Some(vec![ValidationType::String]),
+                            render: None,
+                            default: None,
+                            required: false,
+                            description: Some(desc.to_string()),
+                        },
+                    );
+                }
+                attrs
+            }),
+            self_closing: true,
+            inline: false,
+            description: Some("Ad slot with targeting metadata (digital renderers)".to_string()),
+        },
+    );
+
     // ── float ───────────────────────────────────────────────────────────
     // Float an image to one side with content wrapping around it. With
     // inline `{% media side=… /%}` markers in the body it becomes a
@@ -1565,6 +1646,21 @@ mod tests {
         for a in ["size", "ecl", "align", "color", "background", "quiet_zone"] {
             assert!(qattrs.contains_key(a), "qr.{a} declared");
             assert!(!qattrs.get(a).unwrap().required, "qr.{a} optional");
+        }
+        // gate / ad are self-closing digital-rendering markers; attrs all optional.
+        for name in ["gate", "ad"] {
+            assert!(!cfg.tags[name].inline, "{name} is a block tag");
+            assert!(cfg.tags[name].self_closing, "{name} self-closing");
+        }
+        let gattrs = cfg.tags["gate"].attributes.as_ref().unwrap();
+        assert!(
+            !gattrs["access_level"].required,
+            "gate.access_level optional"
+        );
+        let adattrs = cfg.tags["ad"].attributes.as_ref().unwrap();
+        for a in ["slot", "format", "categories", "keywords"] {
+            assert!(adattrs.contains_key(a), "ad.{a} declared");
+            assert!(!adattrs.get(a).unwrap().required, "ad.{a} optional");
         }
     }
 
