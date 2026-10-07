@@ -483,6 +483,19 @@ pub fn default_tags() -> HashMap<String, Schema> {
                         ),
                     },
                 );
+                attrs.insert(
+                    "text".to_string(),
+                    SchemaAttribute {
+                        attr_type: Some(vec![ValidationType::String]),
+                        render: None,
+                        default: None,
+                        required: false,
+                        description: Some(
+                            "Visible link text. When omitted, the target section heading is used."
+                                .into(),
+                        ),
+                    },
+                );
                 attrs
             }),
             self_closing: true,
